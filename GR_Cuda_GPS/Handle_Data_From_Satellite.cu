@@ -21,72 +21,80 @@ cudaError_t checkCuda(cudaError_t result)
 
 
 
-__global__ void kernelMultiArray2D(short* A, short* B, short* C, short* D, size_t pitch, int rows, int cols) {
+__global__ void kernelMultiArray2D(short* ACos, short *ASin, short* B, short* CCos, short *CSin, int rows, int cols, short gain) {
 	int col = blockIdx.x * blockDim.x + threadIdx.x;
 	int row = blockIdx.y * blockDim.y + threadIdx.y;
-
-	int index = pitch / sizeof(short);
-	int index_array = row * index + col;
-
-	if ((col < cols) && (row < rows)) {
-		A[index_array] = A[index_array] * B[index_array] * C[index_array] * D[index_array];
-	}
-
+	int index = col + row * cols;
+	int temp = ACos[index];
+	ACos[index] = temp * B[index] * CCos[index] * gain;
+	ASin[index] = temp * B[index] * CSin[index] * gain;
 }
 
-__global__ void kernerSumColumnArray2D(short *A, short *array, size_t pitch, int rows, int cols) {
+__global__ void kernerSumColumnArray2D(short *ACos, short *ASin, int rows, int cols, short *iq_buff) {
 
-	int col = blockDim.x * blockIdx.x + threadIdx.x;
-	int row = blockDim.y * blockIdx.y + threadIdx.y;
+	int col = blockIdx.x * blockDim.x + threadIdx.x;
+	int row = blockIdx.y * blockDim.y + threadIdx.y;
+	int index = col + row * cols;
 
 	if (col < cols && row == 0) {
-		short sum = 0;
+		int sumCos = 0;
+		int sumSin = 0;
 		for (int i = 0; i < rows; i++) {
-			short *temp_array = (short*)((char*)A + (row + i) * pitch);
-			sum += temp_array[col];
+			sumCos += ACos[i*cols + index];
+			sumSin += ASin[i*cols + index];
 		}
-		array[col] = sum;
+		iq_buff[col * 2] = short((sumCos + 64) >> 7);
+		iq_buff[col * 2 + 1] = short((sumSin + 64) >> 7);
+		//arrayCos[col] = sumCos;
+		//arraySin[col] = sumSin;
 	}
 }
 
 
-
-extern "C" void multiArray2D_Wrapper(short *h_A, short *h_B, short *h_C, short *h_D, int rows, int cols, short *array) {
+extern "C" void multiArray2D_Wrapper(short *h_A, short *h_B, short *h_CCos, short *h_CSin, int rows, int cols, short *arrayCos, short *arraySin, short *h_iq_buff, short gain) {
 
 	size_t size_array1D = cols * sizeof(short);
 	size_t size_array2D = rows * cols * sizeof(short);
 
-	short *d_A, *d_B, *d_C, *d_D;
-	short *d_array;
-	size_t pitch;
+	short *dev_ACos, *dev_ASin, *dev_B, *dev_CCos, *dev_CSin;
+	//short *d_arrayCos, *d_arraySin;
+	short *d_iq_buff;
 
-	//array = (short *)malloc(size_array1D * sizeof(short));
+	int blockSize = BLOCK_SIZES;
+	int gridSize = (rows * cols + blockSize - 1) / blockSize;
 
-	checkCuda(cudaMallocPitch((void**)&d_A, &pitch, cols * sizeof(short), rows));
-	checkCuda(cudaMallocPitch((void**)&d_B, &pitch, cols * sizeof(short), rows));
-	checkCuda(cudaMallocPitch((void**)&d_C, &pitch, cols * sizeof(short), rows));
-	checkCuda(cudaMallocPitch((void**)&d_D, &pitch, cols * sizeof(short), rows));
-	checkCuda(cudaMallocPitch((void**)&d_array, &pitch, cols * sizeof(short), 1));
+	checkCuda(cudaMalloc((void**)&dev_ACos, size_array2D));
+	checkCuda(cudaMalloc((void**)&dev_ASin, size_array2D));
+	checkCuda(cudaMalloc((void**)&dev_B, size_array2D));
+	checkCuda(cudaMalloc((void**)&dev_CCos, size_array2D));
+	checkCuda(cudaMalloc((void**)&dev_CSin, size_array2D));
+	//checkCuda(cudaMalloc((void**)&d_arrayCos, size_array1D));
+	//checkCuda(cudaMalloc((void**)&d_arraySin, size_array1D));
+	checkCuda(cudaMalloc((void**)&d_iq_buff, cols * 2 * sizeof(short)));
 
-	checkCuda(cudaMemcpy2D(d_A, pitch, h_A, cols * sizeof(short), cols * sizeof(short), rows, cudaMemcpyHostToDevice));
-	checkCuda(cudaMemcpy2D(d_B, pitch, h_B, cols * sizeof(short), cols * sizeof(short), rows, cudaMemcpyHostToDevice));
-	checkCuda(cudaMemcpy2D(d_C, pitch, h_C, cols * sizeof(short), cols * sizeof(short), rows, cudaMemcpyHostToDevice));
-	checkCuda(cudaMemcpy2D(d_D, pitch, h_D, cols * sizeof(short), cols * sizeof(short), rows, cudaMemcpyHostToDevice));
 
-	dim3 blocksPerGrid(1024, 1, 1);
-	dim3 threadsPerBlock(1024, 1, 1);
+	checkCuda(cudaMemcpy(dev_ACos, h_A, size_array2D, cudaMemcpyHostToDevice));
+	//checkCuda(cudaMemcpy(dev_ASin, h_ASin, size_array2D, cudaMemcpyHostToDevice));
+	checkCuda(cudaMemcpy(dev_B, h_B, size_array2D, cudaMemcpyHostToDevice));
+	checkCuda(cudaMemcpy(dev_CCos, h_CCos, size_array2D, cudaMemcpyHostToDevice));
+	checkCuda(cudaMemcpy(dev_CSin, h_CSin, size_array2D, cudaMemcpyHostToDevice));
 
-	kernelMultiArray2D << <blocksPerGrid, threadsPerBlock >> >(d_A, d_B, d_C, d_D, pitch, rows, cols);
-	kernerSumColumnArray2D << <blocksPerGrid, threadsPerBlock >> > (d_A, d_array, pitch, rows, cols);
 
+	kernelMultiArray2D << <gridSize, blockSize >> >(dev_ACos, dev_ASin, dev_B, dev_CCos, dev_CSin, rows, cols, gain);
+	kernerSumColumnArray2D << <gridSize, blockSize >> > (dev_ACos, dev_ASin, rows, cols, d_iq_buff);
 	cudaThreadSynchronize();
 
-	checkCuda(cudaMemcpy2D(array, cols * sizeof(short), d_array, pitch, cols * sizeof(short), 1, cudaMemcpyDeviceToHost));
+	//checkCuda(cudaMemcpy(arrayCos, d_arrayCos, size_array1D, cudaMemcpyDeviceToHost));
+	//checkCuda(cudaMemcpy(arraySin, d_arraySin, size_array1D, cudaMemcpyDeviceToHost));
+	checkCuda(cudaMemcpy(h_iq_buff, d_iq_buff, cols * 2 * sizeof(short), cudaMemcpyDeviceToHost));
 
-	checkCuda(cudaFree(d_A));
-	checkCuda(cudaFree(d_B));
-	checkCuda(cudaFree(d_C));
-	checkCuda(cudaFree(d_D));
-	checkCuda(cudaFree(d_array));
+	checkCuda(cudaFree(dev_ACos));
+	checkCuda(cudaFree(dev_ASin));
+	checkCuda(cudaFree(dev_B));
+	checkCuda(cudaFree(dev_CCos));
+	checkCuda(cudaFree(dev_CSin));
+	//checkCuda(cudaFree(d_arrayCos));
+	//checkCuda(cudaFree(d_arraySin));
+
 	printf("\nhet\n");
 }

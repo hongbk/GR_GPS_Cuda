@@ -2258,12 +2258,13 @@ int main()
 				//ip = chan[i].dataBit * chan[i].codeCA * cosTable512[iTable] * gain[i];
 				//qp = chan[i].dataBit * chan[i].codeCA * sinTable512[iTable] * gain[i];
 				int index = i * iq_buff_size + isamp;
-				a[index] = chan[i].dataBit;
+			
+			/*	a[index] = chan[i].dataBit;
 				a1[index] = chan[i].dataBit;
 				b[index] = chan[i].codeCA;
 				c[index] = cosTable512[iTable];
 				c1[index] = sinTable512[iTable];
-				d[index] = gain[i];
+				d[index] = gain[i];*/
 
 				chan[i].code_phase += chan[i].f_code * delt;
 
@@ -2296,16 +2297,19 @@ int main()
 				chan[i].carr_phase += chan[i].carr_phasestep;
 			}
 		}
+		short gain = 4;
 		clock_t check1, check2;
 		// End of omp parallel for
 		check1 = clock();
-		multiArray2D_Wrapper(a, b, c, d, count, iq_buff_size, arrayCos);
+		//multiArray2D_Wrapper(a, b, c, d, count, iq_buff_size, arrayCos);
 
-		multiArray2D_Wrapper(a1, b, c1, d, count, iq_buff_size, arraySin);
+		//multiArray2D_Wrapper(a1, b, c1, d, count, iq_buff_size, arraySin);
+
+		multiArray2D_Wrapper(a, b, c, c1, count, iq_buff_size, arrayCos, arraySin, iq_buff, gain);
 		check2 = clock();
 		printf("Total time taken by CPU: %f\n", (double)(check2 - check1) / CLOCKS_PER_SEC);
 
-		for (isamp = 0; isamp < iq_buff_size; isamp++)
+		/*for (isamp = 0; isamp < iq_buff_size; isamp++)
 		{
 			int i_acc = 0;
 			int q_acc = 0;
