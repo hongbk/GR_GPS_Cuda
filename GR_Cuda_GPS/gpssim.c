@@ -1669,31 +1669,6 @@ void zeros(int *am, int start, int endv) {
 	}
 }
 
-void freeMemoryArray2D(short** arr, int N) {
-	for (int i = 0; i < N; i++) {
-		short* currentShortPtr = arr[i];
-		free(currentShortPtr);
-	}
-}
-
-short ** allocMat2D(unsigned rows, unsigned cols)
-{
-
-	short **ret = (short*)malloc(rows * sizeof(short*));
-
-	for (int i = 0; i < rows; i++) {
-		ret[i] = (short*)malloc(cols * sizeof(short));
-		if (ret[i] == NULL) {
-			fprintf(stderr, "out of memory\n");
-			exit(1);
-		}
-	}
-
-	/*short ** ret = new short*[rows];
-	for (unsigned i = 0U; i < rows; ++i)
-		ret[i] = new short[cols];*/
-	return ret;
-}
 int isEmpty(char *a) {
 	if (a == NULL || strcmp(a, "") == 0)
 	{
@@ -1729,6 +1704,20 @@ int check_can_run(char *navfn, char *user_motion, char *nmea_gga, char *localtio
 	}
 	return 0;
 }
+
+inline
+cudaError_t checkCuda(cudaError_t result)
+{
+#if defined(DEBUG) || defined(_DEBUG)
+	if (result != cudaSuccess) {
+		fprintf(stderr, "CUDA Runtime Error: %s error code %d\n", cudaGetErrorString(result), result);
+		getchar();
+		//assert(result == cudaSuccess);
+	}
+#endif
+	return result;
+}
+
 int main()
 {
 	//clock_t tstart, tend, tstart1, tEnd1, sumTime;
@@ -1744,7 +1733,6 @@ int main()
 	char frequecy[256] = { 0 };
 	char iqbit[256] = { 0 };
 	char buffer[256] = { 0 };
-	short *arrayCos, *arraySin;
 
 
 	FILE *fp;
@@ -1762,6 +1750,7 @@ int main()
 	double elvmask = 0.0; // in degree
 
 						  //short ip,qp;
+	int ip, qp;
 	int iTable;
 	short *iq_buff = NULL;
 	signed char *iq8_buff = NULL;
@@ -1813,7 +1802,7 @@ int main()
 	navfile[0] = 0;
 	umfile[0] = 0;
 	strcpy(outfile, "gpssim.bin");
-	samp_freq = 5e6;
+	samp_freq = 10e6;
 	data_format = SC16;
 	g0.week = -1; // Invalid start time
 	iduration = USER_MOTION_SIZE;
@@ -2192,22 +2181,26 @@ int main()
 
 	}
 	countPoint = count;
-	//a = new short[count][iq_buff_size];
-	//a = allocMat2D(count, iq_buff_size);
-	//a1 = allocMat2D(count, iq_buff_size);
-	//b = allocMat2D(count, iq_buff_size);
-	//c = allocMat2D(count, iq_buff_size);
-	//c1 = allocMat2D(count, iq_buff_size);
-	//d = allocMat2D(count, iq_buff_size);
+
 	a = (short*)malloc(count * iq_buff_size * sizeof(short));
-	a1 = (short*)malloc(count * iq_buff_size * sizeof(short));
+
 	b = (short*)malloc(count * iq_buff_size * sizeof(short));
-	c = (short*)malloc(count * iq_buff_size * sizeof(short));
-	c1 = (short*)malloc(count * iq_buff_size * sizeof(short));
-	d = (short*)malloc(count * iq_buff_size * sizeof(short));
-	arrayCos = (short*)malloc(iq_buff_size * sizeof(short));
-	arraySin = (short*)malloc(iq_buff_size * sizeof(short));
+	//c = (short*)malloc(count * iq_buff_size * sizeof(short));
+	//c1 = (short*)malloc(count * iq_buff_size * sizeof(short));
+
+
 	//point = (TPoint *)malloc(count * sizeof(TPoint));
+
+	short *dev_CCos, *dev_CSin, *d_iq_buff;
+	checkCuda(cudaMalloc((void**)&dev_CCos, count * iq_buff_size * sizeof(short)));
+	checkCuda(cudaMalloc((void**)&dev_CSin, count * iq_buff_size * sizeof(short)));
+	checkCuda(cudaMalloc((void**)&d_iq_buff, iq_buff_size * 2 * sizeof(short)));
+
+	short *cos_page, *sin_page;
+
+	checkCuda(cudaMallocHost((void**)&cos_page, count * iq_buff_size * sizeof(short)));
+	checkCuda(cudaMallocHost((void**)&sin_page, count * iq_buff_size * sizeof(short)));
+
 
 	clock_t tstart = clock();
 
@@ -2245,28 +2238,100 @@ int main()
 		}
 
 
-
-
-		///////-----------------------USE SIMD--------------------------------//////////
-		//tstart1 = clock();
-		for (isamp = 0; isamp < iq_buff_size; isamp++)
+		// code dont use cuda
+		/*for (isamp = 0; isamp<iq_buff_size; isamp++)
 		{
+			int i_acc = 0;
+			int q_acc = 0;
+
+			for (i = 0; i<MAX_CHAN; i++)
+			{
+				if (chan[i].prn>0)
+				{
+					iTable = (chan[i].carr_phase >> 16) & 511;
+
+					ip = chan[i].dataBit * chan[i].codeCA * cosTable512[iTable] * gain[i];
+					qp = chan[i].dataBit * chan[i].codeCA * sinTable512[iTable] * gain[i];
+
+					// Accumulate for all visible satellites
+					i_acc += ip;
+					q_acc += qp;
+
+					// Update code phase
+					chan[i].code_phase += chan[i].f_code * delt;
+
+					if (chan[i].code_phase >= CA_SEQ_LEN)
+					{
+						chan[i].code_phase -= CA_SEQ_LEN;
+
+						chan[i].icode++;
+
+						if (chan[i].icode >= 20) // 20 C/A codes = 1 navigation data bit
+						{
+							chan[i].icode = 0;
+							chan[i].ibit++;
+
+							if (chan[i].ibit >= 30) // 30 navigation data bits = 1 word
+							{
+								chan[i].ibit = 0;
+								chan[i].iword++;
+								
+								//if (chan[i].iword>=N_DWRD)
+								//printf("\nWARNING: Subframe word buffer overflow.\n");
+								
+							}
+
+							// Set new navigation data bit
+							chan[i].dataBit = (int)((chan[i].dwrd[chan[i].iword] >> (29 - chan[i].ibit)) & 0x1UL) * 2 - 1;
+						}
+					}
+
+					// Set currnt code chip
+					chan[i].codeCA = chan[i].ca[(int)chan[i].code_phase] * 2 - 1;
+
+					// Update carrier phase
+					chan[i].carr_phase += chan[i].carr_phasestep;
+				}
+			}
+
+			// Scaled by 2^7
+			i_acc = (i_acc + 64) >> 7;
+			q_acc = (q_acc + 64) >> 7;
+
+			// Store I/Q samples into buffer
+			iq_buff[isamp * 2] = (short)i_acc;
+			iq_buff[isamp * 2 + 1] = (short)q_acc;
+		}*/
+
+
+		///////-----------------------USE CUDA--------------------------------//////////
+		//tstart1 = clock();
+
 			for (int i = 0; i < count; i++)
 			{
+				double x= chan[i].f_code * delt;
+				for (isamp = 0; isamp < iq_buff_size; isamp++)
+				
+			{
 				iTable = (chan[i].carr_phase >> 16) & 511;
-
+				
 				//ip = chan[i].dataBit * chan[i].codeCA * cosTable512[iTable] * gain[i];
 				//qp = chan[i].dataBit * chan[i].codeCA * sinTable512[iTable] * gain[i];
 				int index = i * iq_buff_size + isamp;
 			
-			/*	a[index] = chan[i].dataBit;
-				a1[index] = chan[i].dataBit;
-				b[index] = chan[i].codeCA;
-				c[index] = cosTable512[iTable];
-				c1[index] = sinTable512[iTable];
-				d[index] = gain[i];*/
+				cos_page[index] = chan[i].dataBit * chan[i].codeCA * cosTable512[iTable] * gain[i];
 
-				chan[i].code_phase += chan[i].f_code * delt;
+				sin_page[index] = chan[i].dataBit * chan[i].codeCA * sinTable512[iTable] * gain[i];
+
+				//a1[index] = chan[i].dataBit;
+
+				//b[index] = chan[i].codeCA;
+				//c[index]= cosTable512[iTable];
+				//c1[index]= sinTable512[iTable];
+				
+				//d[index] = gain[i];
+
+				chan[i].code_phase += x;// chan[i].f_code * delt;
 
 				if (chan[i].code_phase >= CA_SEQ_LEN)
 				{
@@ -2297,17 +2362,14 @@ int main()
 				chan[i].carr_phase += chan[i].carr_phasestep;
 			}
 		}
-		short gain = 4;
+		short temp_gain = 4;
 		clock_t check1, check2;
 		// End of omp parallel for
 		check1 = clock();
-		//multiArray2D_Wrapper(a, b, c, d, count, iq_buff_size, arrayCos);
-
-		//multiArray2D_Wrapper(a1, b, c1, d, count, iq_buff_size, arraySin);
-
-		multiArray2D_Wrapper(a, b, c, c1, count, iq_buff_size, arrayCos, arraySin, iq_buff, gain);
+		//handleData_in_kernel(chan, gain, delt, count, iq_buff_size, iq_buff);
+		multiArray2D_Wrapper(cos_page, sin_page, dev_CCos, dev_CSin, d_iq_buff, count, iq_buff_size, iq_buff);
 		check2 = clock();
-		printf("Total time taken by CPU: %f\n", (double)(check2 - check1) / CLOCKS_PER_SEC);
+		printf("\nTotal time taken by GPU: %f\n", (double)(check2 - check1) / CLOCKS_PER_SEC);
 
 		/*for (isamp = 0; isamp < iq_buff_size; isamp++)
 		{
@@ -2427,26 +2489,25 @@ int main()
 		fflush(stdout);
 
 	}
-	/*freeMemoryArray2D(a[i], count);
-	freeMemoryArray2D(a1[i], count);
-	freeMemoryArray2D(b[i], count);
-	freeMemoryArray2D(c[i], count);
-	freeMemoryArray2D(c1[i], count);
-	freeMemoryArray2D(d[i], count);*/
 	free(a);
-	free(a1);
+	//free(a1);
 	free(b);
-	free(c);
-	free(c1);
-	free(d);
-	free(arrayCos);
-	free(arraySin);
+//	free(c);
+//	free(c1);
+	//free(d);
+	checkCuda(cudaFree(dev_CCos));
+	checkCuda(cudaFree(dev_CSin));
+	checkCuda(cudaFree(d_iq_buff));
+	checkCuda(cudaFreeHost(cos_page));
+	checkCuda(cudaFreeHost(sin_page));
 	clock_t tend = clock();
 
 	printf("\nDone!\n");
 
 	// Free I/Q buffer
 	free(iq_buff);
+
+	free(iq8_buff);
 
 	// Close file
 	fclose(fp);
